@@ -8,6 +8,7 @@ import numpy as np
 
 @numba.jit
 def get_thresholds(scores: np.ndarray, num_gt, num_sample_pts=41):
+    # 通过上一步所有匹配成功的预测框得到的score，计算能覆盖的召回率
     scores.sort()
     scores = scores[::-1]
     current_recall = 0

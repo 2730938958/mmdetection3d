@@ -1,8 +1,9 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import random
 import warnings
+import os
 from typing import List, Optional, Sequence, Tuple, Union
-
+import copy
 import cv2
 import mmcv
 import numpy as np
@@ -431,7 +432,7 @@ class ObjectSample(BaseTransform):
             sampled_gt_bboxes_3d = sampled_dict['gt_bboxes_3d']
             sampled_points = sampled_dict['points']
             sampled_gt_labels = sampled_dict['gt_labels_3d']
-
+            input_dict['sampled_dict'] = sampled_dict
             gt_labels_3d = np.concatenate([gt_labels_3d, sampled_gt_labels],
                                           axis=0)
             gt_bboxes_3d = gt_bboxes_3d.new_box(
@@ -2683,3 +2684,214 @@ class LaserMix(BaseTransform):
         repr_str += f'pre_transform={self.pre_transform}, '
         repr_str += f'prob={self.prob})'
         return repr_str
+
+
+# 1. 重写RandomFlip3D：同时翻转当前帧和上一帧点云
+@TRANSFORMS.register_module()
+class DualRandomFlip3D(RandomFlip3D):
+    def transform(self, results: dict) -> dict:
+        # 先执行父类的翻转（处理points），记录翻转参数
+        results = super().transform(results)
+
+        # 复用相同的翻转参数，处理prev_points
+        if 'prev_points' in results and results['prev_points'] is not None:
+            prev_points = results['prev_points']
+            # 应用相同的水平翻转
+            if 'HF' in results['transformation_3d_flow']:
+                prev_points.flip('horizontal')
+            # 应用相同的垂直翻转（如果开启）
+            if 'VF' in results['transformation_3d_flow']:
+                prev_points.flip('vertical')
+            results['prev_points'] = prev_points
+
+        return results
+
+
+# 2. 重写GlobalRotScaleTrans：同时旋转/缩放/平移两帧点云
+@TRANSFORMS.register_module()
+class DualGlobalRotScaleTrans(GlobalRotScaleTrans):
+    def transform(self, results: dict) -> dict:
+        # 先执行父类变换（处理points），记录变换参数
+        results = super().transform(results)
+
+        # 复用相同的旋转/缩放/平移参数，处理prev_points
+        if 'prev_points' in results and results['prev_points'] is not None:
+            prev_points = results['prev_points']
+            # 应用相同的旋转
+            if results['pcd_rotation_angle'] is not None:
+                prev_points.rotate(results['pcd_rotation_angle'])
+            # 应用相同的缩放
+            if results['pcd_scale_factor'] is not None:
+                prev_points.scale(results['pcd_scale_factor'])
+            # 应用相同的平移
+            if results['pcd_trans'] is not None:
+                prev_points.translate(results['pcd_trans'])
+            results['prev_points'] = prev_points
+
+        return results
+
+
+# 3. 重写PointsRangeFilter：过滤上一帧点云的范围
+@TRANSFORMS.register_module()
+class DualPointsRangeFilter(PointsRangeFilter):
+    def transform(self, results: dict) -> dict:
+        # 先过滤当前帧
+        results = super().transform(results)
+
+        # 过滤上一帧
+        if 'prev_points' in results and results['prev_points'] is not None:
+            prev_points = results['prev_points']
+            self.point_cloud_range = self.pcd_range
+            prev_points = prev_points[
+                (prev_points.coord[:, 0] >= self.point_cloud_range[0]) &
+                (prev_points.coord[:, 0] <= self.point_cloud_range[3]) &
+                (prev_points.coord[:, 1] >= self.point_cloud_range[1]) &
+                (prev_points.coord[:, 1] <= self.point_cloud_range[4]) &
+                (prev_points.coord[:, 2] >= self.point_cloud_range[2]) &
+                (prev_points.coord[:, 2] <= self.point_cloud_range[5])
+                ]
+            results['prev_points'] = prev_points
+
+        return results
+
+
+# 4. 重写PointShuffle：同时打乱两帧点云（可选，点云无序，可省略）
+@TRANSFORMS.register_module()
+class DualPointShuffle(PointShuffle):
+    def transform(self, results: dict) -> dict:
+        # 先打乱当前帧
+        results = super().transform(results)
+
+        # 打乱上一帧
+        if 'prev_points' in results and results['prev_points'] is not None:
+            prev_points = results['prev_points']
+            # 生成相同的随机索引（保证打乱逻辑一致）
+            idx = prev_points.shuffle()
+
+
+        return results
+
+
+@TRANSFORMS.register_module()
+class DualObjectSample(ObjectSample):
+    """同步处理当前帧和上一帧的ObjectSample，保证采样目标一致"""
+
+    def transform(self, input_dict: dict) -> dict:
+        """
+        重载transform：先处理当前帧，再复用相同采样结果处理上一帧
+        """
+        # 1. 先执行父类逻辑，处理当前帧（生成sampled_dict）
+        # 先备份原始输入，避免父类修改影响后续
+
+        input_dict = super().transform(input_dict)
+
+        # 2. 若没有采样结果，直接返回（无需处理上一帧）
+        if 'sampled_dict' not in input_dict or input_dict['sampled_dict'] is None:
+            return input_dict
+
+        sampled_dict = input_dict['sampled_dict']  # 获取父类生成的采样结果
+        if sampled_dict is None:
+            return input_dict
+
+        # 3. 提取采样关键数据（当前帧用了什么采样目标，上一帧也用同样的）
+        sampled_gt_bboxes_3d = sampled_dict['gt_bboxes_3d']  # 采样的3D框
+        sampled_points = sampled_dict['points']  # 采样的点云
+
+        transform_sample_point = False
+
+        if transform_sample_point:
+            idx = input_dict.get('lidar_path').split('/')[-1].split('.')[0]
+            pre_idx = f"{int(idx) - 1:06d}"
+            matrix_folder_path = '/home/users/weiyan/mmdetection3d/data/kitti/training/align_matrix'
+            matrix_path = f'{matrix_folder_path}/{pre_idx}to{idx}.npy'
+            if os.path.exists(matrix_path):
+                transform_matrix = np.load(matrix_path)
+            else:
+                transform_matrix = np.eye(4, dtype=np.float32)
+            transform_matrix = torch.from_numpy(transform_matrix).float()
+            inv_transform_matrix = torch.inverse(transform_matrix)
+
+            # 将采样框的中心/旋转角变换到上一帧坐标系
+            sampled_gt_bboxes_3d_prev = self._transform_boxes(
+                torch.tensor(sampled_gt_bboxes_3d)[:, :7].float(), inv_transform_matrix
+            )
+            # 变换后的采样框（用于上一帧点云过滤）
+            sampled_gt_bboxes_3d = sampled_gt_bboxes_3d_prev.numpy()
+
+            # 4.2 将「当前帧的采样点云」变换到「上一帧坐标系」
+            sampled_points_prev = transform_points(sampled_points, inv_transform_matrix)
+            # 变换后的采样点云（用于拼接到上一帧）
+            sampled_points = sampled_points_prev
+
+        # 4. 处理上一帧点云（核心：和当前帧执行完全相同的操作）
+        if 'prev_points' in input_dict and input_dict['prev_points'] is not None:
+            prev_points = input_dict['prev_points']
+
+            # 步骤1：移除上一帧中落在采样框内的原始点（和当前帧逻辑一致）
+            prev_points = self.remove_points_in_boxes(prev_points, sampled_gt_bboxes_3d)
+
+            # 步骤2：将相同的采样点云拼接到上一帧点云后（保持顺序一致）
+            prev_points = prev_points.cat([sampled_points, prev_points])
+
+            # 步骤3：更新上一帧点云
+            input_dict['prev_points'] = prev_points
+
+        return input_dict
+
+    # 复用父类的remove_points_in_boxes静态方法（无需重写）
+    @staticmethod
+    def remove_points_in_boxes(points: BasePoints,
+                               boxes: np.ndarray) -> np.ndarray:
+        return ObjectSample.remove_points_in_boxes(points, boxes)
+
+    # ========== 新增辅助函数（最小化修改所需） ==========
+    def _transform_boxes(self, boxes_tensor, transform_matrix):
+        """将3D框（x,y,z,l,w,h,yaw）从当前帧坐标系变换到上一帧坐标系"""
+        # 提取框中心 (x,y,z)
+        centers = boxes_tensor[:, :3]  # (N, 3)
+        # 转为齐次坐标 (N, 4)
+        homogeneous_centers = torch.cat([centers, torch.ones_like(centers[:, :1])], dim=1)
+        # 执行矩阵变换
+        transformed_centers = torch.matmul(transform_matrix, homogeneous_centers.T).T[:, :3]
+        # 替换中心，保持尺寸/旋转角不变（旋转角需根据场景调整，若有旋转则需额外处理）
+        boxes_tensor[:, :3] = transformed_centers
+        return boxes_tensor
+
+def transform_points(points: BasePoints, trans_mat: Union[torch.Tensor, np.ndarray],
+                     inplace: bool = False) -> BasePoints:
+    """
+    直接用4x4齐次变换矩阵变换点云坐标
+
+    Args:
+        points: BasePoints/LiDARPoints对象
+        trans_mat: 4x4齐次变换矩阵（旋转+平移），支持numpy/torch
+        inplace: 是否原地修改，False则返回新对象
+
+    Returns:
+        BasePoints/LiDARPoints: 变换后的点云对象
+    """
+    # 1. 处理输入矩阵：转为torch tensor，匹配点云设备，确保shape=(4,4)
+    if not isinstance(trans_mat, torch.Tensor):
+        trans_mat = torch.tensor(trans_mat, dtype=torch.float32, device=points.tensor.device)
+    assert trans_mat.shape == (4, 4), f"变换矩阵必须是4x4，当前shape={trans_mat.shape}"
+
+    # 2. 选择是否原地修改
+    if inplace:
+        target_pts = points
+    else:
+        target_pts = points.clone()
+
+    # 3. 构造齐次坐标 (N, 4)：[x,y,z,1]
+    homo_pts = torch.cat([
+        target_pts.tensor[:, :3],  # 前3列是x/y/z
+        torch.ones((target_pts.shape[0], 1), device=target_pts.device)  # 第4列全1
+    ], dim=1)
+
+    # 4. 执行矩阵乘法：齐次坐标 @ 变换矩阵的转置（关键！）
+    # 数学原理：P' = P * M^T （P是行向量，M是变换矩阵）
+    transformed_homo = homo_pts @ trans_mat.T
+
+    # 5. 还原为3维坐标，更新到点云对象
+    target_pts.coord = transformed_homo[:, :3]
+
+    return target_pts

@@ -497,7 +497,7 @@ class PVRCNNBBoxHead(BaseModule):
         selected = []
         if obj_scores.shape[0] > 0:
             box_scores_nms, indices = torch.topk(
-                obj_scores, k=min(4096, obj_scores.shape[0]))
+                obj_scores, k=min(50, obj_scores.shape[0]))
             bbox_bev = bbox.bev[indices]
             bbox_for_nms = xywhr2xyxyr(bbox_bev)
 

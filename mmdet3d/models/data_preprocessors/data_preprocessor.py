@@ -178,6 +178,13 @@ class Det3DDataPreprocessor(DetDataPreprocessor):
                 voxel_dict = self.voxelize(inputs['points'], data_samples)
                 batch_inputs['voxels'] = voxel_dict
 
+        if 'prev_points' in inputs:
+            batch_inputs['prev_points'] = inputs['prev_points']
+
+            if self.voxel:
+                prev_voxel_dict = self.voxelize(inputs['prev_points'], data_samples)
+                batch_inputs['prev_voxels'] = prev_voxel_dict
+
         if 'imgs' in inputs:
             imgs = inputs['imgs']
 

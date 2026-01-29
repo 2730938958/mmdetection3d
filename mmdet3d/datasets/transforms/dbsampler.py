@@ -2,7 +2,7 @@
 import copy
 import os
 from typing import List, Optional
-
+import torch
 import mmengine
 import numpy as np
 from mmengine.fileio import get_local_path
@@ -10,7 +10,7 @@ from mmengine.fileio import get_local_path
 from mmdet3d.datasets.transforms import data_augment_utils
 from mmdet3d.registry import TRANSFORMS
 from mmdet3d.structures.ops import box_np_ops
-
+from mmdet3d.structures.points import BasePoints, get_points_type
 
 class BatchSampler:
     """Class for sampling specific category of ground truths.
@@ -249,7 +249,7 @@ class DataBaseSampler(object):
                 sampled += sampled_cls
                 if len(sampled_cls) > 0:
                     if len(sampled_cls) == 1:
-                        sampled_gt_box = sampled_cls[0]['box3d_lidar'][
+                        sampled_gt_box = np.array(sampled_cls[0]['box3d_lidar'])[
                             np.newaxis, ...]
                     else:
                         sampled_gt_box = np.stack(
@@ -273,6 +273,31 @@ class DataBaseSampler(object):
                     info['path']) if self.data_root else info['path']
                 results = dict(lidar_points=dict(lidar_path=file_path))
                 s_points = self.points_loader(results)['points']
+
+                if True:
+                    points_class = get_points_type('LIDAR')
+                    new_tensor = s_points.tensor.clone()
+                    z_coords = new_tensor[:, 2]
+                    sorted_indices = torch.argsort(z_coords, descending=True)
+                    sorted_tensor = new_tensor[sorted_indices]
+                    n = sorted_tensor.shape[0]
+                    top40_percent_num = int(n * 0.4)
+                    rest_point = sorted_tensor[top40_percent_num:]
+
+                    random_ratio = 0.8 + 0.2 * torch.rand(1, device=rest_point.device).item()
+
+                    # 计算需要保留的点数（向上取整或向下取整均可，根据需求选择）
+                    keep_num = int(rest_point.shape[0] * random_ratio)
+                    # 确保至少保留1个点（避免比例过小导致keep_num为0）
+                    keep_num = max(1, keep_num)
+
+                    # 随机选择对应数量的点
+                    keep_indices = torch.randperm(rest_point.shape[0], device=rest_point.device)[:keep_num]
+                    final_pc = rest_point[keep_indices]
+
+                    s_points = points_class(
+                        final_pc.numpy(), points_dim=4, attribute_dims=None)
+
                 s_points.translate(info['box3d_lidar'][:3])
 
                 count += 1

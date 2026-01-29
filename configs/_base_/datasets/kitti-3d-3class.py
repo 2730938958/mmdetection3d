@@ -2,7 +2,7 @@
 dataset_type = 'KittiDataset'
 data_root = 'data/kitti/'
 class_names = ['Pedestrian', 'Cyclist', 'Car']
-point_cloud_range = [0, -40, -3, 70.4, 40, 1]
+point_cloud_range = [-10.24, -10.24, -3, 10.24, 10.24, 3]
 input_modality = dict(use_lidar=True, use_camera=False)
 metainfo = dict(classes=class_names)
 

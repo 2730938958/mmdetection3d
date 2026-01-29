@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import copy
 from typing import List, Optional, Union
-
+import torch
 import mmcv
 import mmengine
 import numpy as np
@@ -1298,3 +1298,189 @@ class MultiModalityDet3DInferencerLoader(BaseTransform):
         multi_modality_inputs.update(imgs_inputs)
 
         return multi_modality_inputs
+
+
+import os
+
+
+@TRANSFORMS.register_module()
+class LoadPrevFramePoints(BaseTransform):
+    """加载前一帧的点云数据（适配官方LoadPointsFromFile最新版本）"""
+
+    def __init__(self,
+                 coord_type: str,
+                 load_dim: int = 6,
+                 use_dim = [0, 1, 2],
+                 shift_height: bool = False,
+                 use_color: bool = False,
+                 norm_intensity: bool = False,
+                 norm_elongation: bool = False,
+                 backend_args = None) -> None:
+        # 完全复用官方LoadPointsFromFile的初始化参数
+        self.coord_type = coord_type
+        self.load_dim = load_dim
+        self.use_dim = use_dim
+        self.shift_height = shift_height
+        self.use_color = use_color
+        self.norm_intensity = norm_intensity
+        self.norm_elongation = norm_elongation
+        self.backend_args = backend_args
+
+        # 初始化官方的点云加载器
+        self.point_loader = LoadPointsFromFile(
+            coord_type=coord_type,
+            load_dim=load_dim,
+            use_dim=use_dim,
+            shift_height=shift_height,
+            use_color=use_color,
+            norm_intensity=norm_intensity,
+            norm_elongation=norm_elongation,
+            backend_args=backend_args
+        )
+
+    def _get_prev_frame_path(self, curr_path: str) -> str:
+        """
+        核心：根据当前帧路径获取前一帧路径（可根据数据集格式调整）
+        适配常见数据集格式：
+        - KITTI: 000001.bin -> 000000.bin
+        - nuScenes: xxx_LIDAR_TOP.bin -> 前一帧同名文件
+        """
+        # 分离目录和文件名
+        dir_name = os.path.dirname(curr_path)
+        file_name = os.path.basename(curr_path)
+
+        # ========== 关键：解析帧号（根据你的数据集修改） ==========
+        # 示例1：KITTI格式（纯数字文件名，如 000001.bin）
+        if file_name.split('.')[0].isdigit():
+            frame_num = int(file_name.split('.')[0])
+            prev_frame_num = frame_num - 1
+            # 补零保持位数一致（KITTI是6位）
+            prev_file_name = f'{prev_frame_num:06d}.bin'
+
+        # 示例2：带前缀的格式（如 frame_0001.bin）
+        elif 'frame_' in file_name:
+            # 提取数字部分
+            import re
+            num_match = re.search(r'frame_(\d+)\.bin', file_name)
+            if num_match:
+                frame_num = int(num_match.group(1))
+                prev_frame_num = frame_num - 1
+                prev_file_name = file_name.replace(
+                    f'frame_{frame_num:06d}.bin',
+                    f'frame_{prev_frame_num:06d}.bin'
+                )
+            else:
+                # 匹配失败则返回当前帧
+                return curr_path
+
+        # 其他格式请自行扩展
+        else:
+            # 无法解析时返回当前帧路径
+            return curr_path
+
+        # 构建前一帧完整路径
+        prev_path = os.path.join(dir_name, prev_file_name)
+
+        # 边界处理：帧号小于0时返回当前帧
+        if prev_frame_num < 0:
+            return curr_path
+
+        return prev_path
+
+    def transform(self, results: dict) -> dict:
+        """
+        重载transform方法，适配官方数据格式
+        """
+        # 1. 获取当前帧的lidar路径（匹配官方格式：results['lidar_points']['lidar_path']）
+        curr_lidar_path = results['lidar_points']['lidar_path']
+
+        # 2. 获取前一帧路径
+        prev_lidar_path = self._get_prev_frame_path(curr_lidar_path)
+
+        # 3. 检查前一帧文件是否存在
+        if not os.path.exists(prev_lidar_path):
+            # 文件不存在时，用当前帧点云代替
+            results['prev_points'] = results['points'].clone()
+            return results
+
+        # 4. 构建前一帧的results字典（匹配官方格式）
+        prev_results = {
+            'lidar_points': {
+                'lidar_path': prev_lidar_path
+            }
+        }
+
+        # 5. 使用官方加载器加载前一帧点云
+        prev_results = self.point_loader.transform(prev_results)
+
+        align_to_ego_frame = True
+        if align_to_ego_frame:
+            points = prev_results['points'].clone()
+            pre_idx = prev_lidar_path.split('/')[-1].split('.')[0]
+            ego_idx = curr_lidar_path.split('/')[-1].split('.')[0]
+            matrix_folder_path = 'data/kitti/training/align_matrix'
+            matrix_path = f'{matrix_folder_path}/{pre_idx}to{ego_idx}.npy'
+            if os.path.exists(matrix_path):
+                transform_matrix = np.load(matrix_path)
+            else:
+                transform_matrix = np.eye(4, dtype=np.float32)
+            transformed_points = transform_points(points, transform_matrix)
+            prev_results['points'] = transformed_points
+
+        # 6. 将前一帧点云添加到当前results中
+        results['prev_points'] = prev_results['points']
+
+        return results
+
+    def __repr__(self) -> str:
+        """保持和官方一致的repr格式"""
+        repr_str = f'{self.__class__.__name__}('
+        repr_str += f'coord_type={self.coord_type}, '
+        repr_str += f'load_dim={self.load_dim}, '
+        repr_str += f'use_dim={self.use_dim}, '
+        repr_str += f'shift_height={self.shift_height}, '
+        repr_str += f'use_color={self.use_color})'
+        return repr_str
+
+
+
+
+
+def transform_points(points: BasePoints, trans_mat: Union[torch.Tensor, np.ndarray],
+                     inplace: bool = False) -> BasePoints:
+    """
+    直接用4x4齐次变换矩阵变换点云坐标
+
+    Args:
+        points: BasePoints/LiDARPoints对象
+        trans_mat: 4x4齐次变换矩阵（旋转+平移），支持numpy/torch
+        inplace: 是否原地修改，False则返回新对象
+
+    Returns:
+        BasePoints/LiDARPoints: 变换后的点云对象
+    """
+    # 1. 处理输入矩阵：转为torch tensor，匹配点云设备，确保shape=(4,4)
+    if not isinstance(trans_mat, torch.Tensor):
+        trans_mat = torch.tensor(trans_mat, dtype=torch.float32, device=points.tensor.device)
+    assert trans_mat.shape == (4, 4), f"变换矩阵必须是4x4，当前shape={trans_mat.shape}"
+
+    # 2. 选择是否原地修改
+    if inplace:
+        target_pts = points
+    else:
+        target_pts = points.clone()
+
+    # 3. 构造齐次坐标 (N, 4)：[x,y,z,1]
+    homo_pts = torch.cat([
+        target_pts.tensor[:, :3],  # 前3列是x/y/z
+        torch.ones((target_pts.shape[0], 1), device=target_pts.device)  # 第4列全1
+    ], dim=1)
+
+    # 4. 执行矩阵乘法：齐次坐标 @ 变换矩阵的转置（关键！）
+    # 数学原理：P' = P * M^T （P是行向量，M是变换矩阵）
+    transformed_homo = homo_pts @ trans_mat.T
+
+    # 5. 还原为3维坐标，更新到点云对象
+    target_pts.coord = transformed_homo[:, :3]
+
+    return target_pts

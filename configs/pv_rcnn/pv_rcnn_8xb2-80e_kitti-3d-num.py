@@ -15,8 +15,8 @@ db_sampler = dict(
     info_path=data_root + 'kitti_dbinfos_train.pkl',
     rate=1.0,
     prepare=dict(
-        filter_by_difficulty=[-1],
-        filter_by_min_points=dict(Pedestrian=5)),
+        # filter_by_difficulty=[-1],
+        filter_by_min_points=dict(Pedestrian=100)),
     classes=class_names,
     sample_groups=dict(Pedestrian=100),
     points_loader=dict(
@@ -153,7 +153,7 @@ model = dict(
         upsample_strides=[1, 2],
         out_channels=[256, 256]),
     rpn_head=dict(
-        type='PartA2RPNHead',
+        type='PartA2NUMRPNHead',
         num_classes=1,
         in_channels=512,
         feat_channels=512,
@@ -179,7 +179,9 @@ model = dict(
             type='mmdet.SmoothL1Loss', beta=1.0 / 9.0, loss_weight=2.0),
         loss_dir=dict(
             type='mmdet.CrossEntropyLoss', use_sigmoid=False,
-            loss_weight=0.2)),
+            loss_weight=0.2),
+        loss_num=dict(loss_weight=1.0)
+        ),
     roi_head=dict(
         type='PVRCNNRoiHead',
         num_classes=1,

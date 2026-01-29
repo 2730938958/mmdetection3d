@@ -47,7 +47,7 @@ def to_tensor(
 
 @TRANSFORMS.register_module()
 class Pack3DDetInputs(BaseTransform):
-    INPUTS_KEYS = ['points', 'img']
+    INPUTS_KEYS = ['points', 'prev_points', 'img']
     INSTANCEDATA_3D_KEYS = [
         'gt_bboxes_3d', 'gt_labels_3d', 'attr_labels', 'depths', 'centers_2d'
     ]
@@ -141,9 +141,10 @@ class Pack3DDetInputs(BaseTransform):
               of the sample.
         """
         # Format 3D data
-        if 'points' in results:
-            if isinstance(results['points'], BasePoints):
-                results['points'] = results['points'].tensor
+        for key in ['points', 'prev_points']:  # 新增prev_points的格式转换
+            if key in results:
+                if isinstance(results[key], BasePoints):
+                    results[key] = results[key].tensor
 
         if 'img' in results:
             if isinstance(results['img'], list):

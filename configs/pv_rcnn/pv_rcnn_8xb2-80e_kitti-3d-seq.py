@@ -15,8 +15,8 @@ db_sampler = dict(
     info_path=data_root + 'kitti_dbinfos_train.pkl',
     rate=1.0,
     prepare=dict(
-        filter_by_difficulty=[-1],
-        filter_by_min_points=dict(Pedestrian=5)),
+        # filter_by_difficulty=[-1],
+        filter_by_min_points=dict(Pedestrian=100)),
     classes=class_names,
     sample_groups=dict(Pedestrian=100),
     points_loader=dict(
@@ -27,26 +27,38 @@ db_sampler = dict(
         backend_args=backend_args),
     backend_args=backend_args)
 
+# 配置文件中修改后的train_pipeline
 train_pipeline = [
+    # 1. 加载当前帧 + 上一帧点云
     dict(
         type='LoadPointsFromFile',
         coord_type='LIDAR',
         load_dim=4,
         use_dim=4,
         backend_args=backend_args),
-    dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True),
-    dict(type='ObjectSample', db_sampler=db_sampler, use_ground_plane=False),
-    dict(type='RandomFlip3D', flip_ratio_bev_horizontal=0.5),
     dict(
-        type='GlobalRotScaleTrans',
+        type='LoadPrevFramePoints',  # 你之前实现的加载上一帧算子
+        coord_type='LIDAR',
+        load_dim=4,
+        use_dim=4,
+        backend_args=backend_args),
+    # 2. 加载标注
+    dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True),
+    # 3. 同步采样：替换为DualObjectSample（核心修改）
+    dict(type='DualObjectSample', db_sampler=db_sampler, use_ground_plane=False),
+    # 4. 其他同步变换（之前定义的Dual算子）
+    dict(type='DualRandomFlip3D', flip_ratio_bev_horizontal=0.5),
+    dict(
+        type='DualGlobalRotScaleTrans',
         rot_range=[-0.78539816, 0.78539816],
         scale_ratio_range=[0.95, 1.05]),
-    dict(type='PointsRangeFilter', point_cloud_range=point_cloud_range),
+    dict(type='DualPointsRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
-    dict(type='PointShuffle'),
+    dict(type='DualPointShuffle'),
+    # 5. 打包输入
     dict(
         type='Pack3DDetInputs',
-        keys=['points', 'gt_bboxes_3d', 'gt_labels_3d'])
+        keys=['points', 'prev_points', 'gt_bboxes_3d', 'gt_labels_3d'])
 ]
 test_pipeline = [
     dict(
@@ -153,7 +165,7 @@ model = dict(
         upsample_strides=[1, 2],
         out_channels=[256, 256]),
     rpn_head=dict(
-        type='PartA2RPNHead',
+        type='PartA2NUMRPNHead',
         num_classes=1,
         in_channels=512,
         feat_channels=512,
@@ -179,7 +191,9 @@ model = dict(
             type='mmdet.SmoothL1Loss', beta=1.0 / 9.0, loss_weight=2.0),
         loss_dir=dict(
             type='mmdet.CrossEntropyLoss', use_sigmoid=False,
-            loss_weight=0.2)),
+            loss_weight=0.2),
+        loss_num=dict(loss_weight=1.0)
+        ),
     roi_head=dict(
         type='PVRCNNRoiHead',
         num_classes=1,

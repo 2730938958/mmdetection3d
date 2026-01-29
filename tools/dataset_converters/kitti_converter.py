@@ -194,10 +194,11 @@ def create_kitti_info_file(data_path,
         with_plane=with_plane,
         image_ids=train_img_ids,
         relative_path=relative_path)
-    _calculate_num_points_in_gt(data_path, kitti_infos_train, relative_path)
+    _calculate_num_points_in_gt(data_path, kitti_infos_train, relative_path, remove_outside=False)
     filename = save_path / f'{pkl_prefix}_infos_train.pkl'
     print(f'Kitti info train file is saved to {filename}')
     mmengine.dump(kitti_infos_train, filename)
+
     kitti_infos_val = get_kitti_image_info(
         data_path,
         training=True,
@@ -206,7 +207,7 @@ def create_kitti_info_file(data_path,
         with_plane=with_plane,
         image_ids=val_img_ids,
         relative_path=relative_path)
-    _calculate_num_points_in_gt(data_path, kitti_infos_val, relative_path)
+    _calculate_num_points_in_gt(data_path, kitti_infos_val, relative_path, remove_outside=False)
     filename = save_path / f'{pkl_prefix}_infos_val.pkl'
     print(f'Kitti info val file is saved to {filename}')
     mmengine.dump(kitti_infos_val, filename)
@@ -309,7 +310,8 @@ def _create_reduced_point_cloud(data_path,
                                 save_path=None,
                                 back=False,
                                 num_features=4,
-                                front_camera_id=2):
+                                front_camera_id=2,
+                                remove_outside=False):
     """Create reduced point clouds for given info.
 
     Args:
@@ -347,7 +349,8 @@ def _create_reduced_point_cloud(data_path,
         # then remove outside.
         if back:
             points_v[:, 0] = -points_v[:, 0]
-        points_v = box_np_ops.remove_outside_points(points_v, rect, Trv2c, P2,
+        if remove_outside:
+            points_v = box_np_ops.remove_outside_points(points_v, rect, Trv2c, P2,
                                                     image_info['image_shape'])
         if save_path is None:
             save_dir = v_path.parent.parent / (v_path.parent.stem + '_reduced')
